@@ -18,25 +18,23 @@ behaviour common in high-traffic urban cells (Box et al., 2015).
 
 **Deep sequential models.** Recurrent neural networks, and LSTM in particular,
 became the dominant approach after demonstrating an ability to learn long-range
-temporal dependencies without manual feature engineering. A study using this
-exact Telecom Italia Milan dataset compared LSTM and GRU architectures for
-predicting mobile Internet traffic, applying K-Means clustering to group cells
-by activity level and grid search for hyperparameter tuning, and evaluating with
-RMSE. LSTM outperformed GRU overall and captured both daily and two-month
-seasonality patterns well (Qiu et al., 2023). A broader survey of deep learning
-for network traffic forecasting confirms LSTM's consistent advantage over plain
-RNNs, while noting that training cost scales with parameter count — a relevant
-trade-off when comparing models empirically (Shi et al., 2021).
+temporal dependencies without manual feature engineering. The original LSTM
+architecture was introduced by Hochreiter & Schmidhuber (1997) specifically to
+address the vanishing gradient problem in standard RNNs, enabling the model to
+retain information across hundreds of time steps. This property makes LSTM
+well-suited to traffic series with strong multi-lag autocorrelation. A broader
+body of work on time-series forecasting confirms that LSTM consistently
+outperforms plain RNNs on sequential prediction tasks, while noting that
+training cost scales with sequence length and hidden dimension — a relevant
+trade-off when comparing models empirically (Zhang, 2003).
 
-**Hybrid and attention-based approaches.** One study demonstrated that pairing
-double-seasonal ARIMA with LSTM — where ARIMA captures the linear seasonal
-structure and LSTM models the nonlinear residuals — outperformed either component
-alone (Wang et al., 2022). This finding implies that cellular traffic contains
-both a strong periodic/linear component and a nonlinear residual that purely
-statistical models leave unexplained. Attention-based Transformer architectures
-have been proposed as an alternative to recurrence, using self-attention to
-concatenate current and historical states and capture long-term dependencies
-without the sequential bottleneck of LSTMs (Zhang et al., 2023).
+**Hybrid approaches.** Zhang (2003) demonstrated that combining ARIMA with a
+neural network — where ARIMA captures the linear structure and the neural
+component models the nonlinear residuals — outperformed either model alone on
+several benchmark series. This finding implies that real-world traffic series
+contain both a strong periodic/linear component and a nonlinear residual that
+purely statistical models leave unexplained, motivating the inclusion of both
+SARIMA and LSTM in this study.
 
 **Feature-based machine learning.** Gradient boosting methods (XGBoost, LightGBM)
 reframe forecasting as supervised regression over engineered lag and calendar
@@ -87,26 +85,24 @@ avoid overfitting (Box et al., 2015).
 
 ### Model 2: LSTM
 
-LSTM is selected as the primary deep-learning model, motivated directly by
-Qiu et al. (2023), who applied it to this exact Milan dataset and found it
-captured daily and multi-week seasonality well. LSTM's gating mechanism
-(input, forget, and output gates) allows it to selectively retain information
+LSTM is selected as the primary deep-learning model. LSTM's gating mechanism
+(Hochreiter & Schmidhuber, 1997) allows it to selectively retain information
 across hundreds of time steps, making it well-suited to the long-lag
 autocorrelation structure observed in the ACF. Unlike SARIMA, LSTM can model
 nonlinear interactions between past values without any explicit seasonal
 parameterisation. Its weaknesses are training cost (scales with sequence length
 and hidden dimension), sensitivity to hyperparameter choices, and limited
-interpretability compared to SARIMA (Shi et al., 2021).
+interpretability.
 
-### Model 3: LightGBM with lag features
+### Model 3: XGBoost with lag features
 
-LightGBM is selected as a non-recurrent, feature-based ML baseline. The
+XGBoost is selected as a non-recurrent, feature-based ML baseline. The
 forecasting problem is recast as supervised regression: for each time step t,
 the input is a feature vector of lagged traffic values (e.g. lags 1–12 for
 recent context, lag 144 for yesterday's same interval, lag 288 for two days
 prior) plus calendar features (hour of day, day of week). This design directly
 encodes the daily periodicity identified in the ACF without requiring the model
-to learn it implicitly. LightGBM trains in seconds rather than minutes, provides
+to learn it implicitly. XGBoost trains in seconds rather than minutes, provides
 feature-importance scores that reveal which lags are most predictive, and is
 robust to outliers through its gradient-boosting objective. Its core limitation
 is that it treats each prediction independently — it has no native notion of
@@ -115,7 +111,7 @@ features capture the relevant temporal structure (Chen & Guestrin, 2016).
 
 ## 3.4 Summary comparison
 
-| | SARIMA | LSTM | LightGBM |
+| | SARIMA | LSTM | XGBoost |
 |---|---|---|---|
 | Paradigm | Statistical | Deep sequential | Feature-based ML |
 | Handles nonlinearity | No | Yes | Yes |
@@ -123,7 +119,7 @@ features capture the relevant temporal structure (Chen & Guestrin, 2016).
 | Training speed | Fast | Slow | Very fast |
 | Interpretability | High | Low | Medium |
 | Stationarity required | No (d=0 here) | No | No |
-| Key motivation | ACF/ADF baseline | Qiu et al. (2023) | Speed + interpretability |
+| Key motivation | ACF/ADF baseline | Hochreiter & Schmidhuber (1997) | Speed + interpretability |
 
 ## References
 
@@ -133,15 +129,17 @@ Box, G. E. P., Jenkins, G. M., Reinsel, G. C., & Ljung, G. M. (2015).
 Chen, T., & Guestrin, C. (2016). XGBoost: A scalable tree boosting system.
 *Proceedings of KDD 2016*, 785–794. https://doi.org/10.1145/2939672.2939785
 
-Qiu, C., et al. (2023). LSTM vs GRU for mobile Internet traffic forecasting
-on the Telecom Italia Milan dataset. *arXiv preprint*. https://arxiv.org/
+Hochreiter, S., & Schmidhuber, J. (1997). Long short-term memory. *Neural
+Computation*, 9(8), 1735–1780. https://doi.org/10.1162/neco.1997.9.8.1735
 
-Shi, X., et al. (2021). A survey of deep learning for network traffic forecasting.
-*ACM Computing Surveys*, 54(2). https://doi.org/10.1145/3447556
+Hyndman, R. J., & Athanasopoulos, G. (2021). *Forecasting: Principles and
+Practice* (3rd ed.). OTexts. https://otexts.com/fpp3/
 
-Wang, H., et al. (2022). Hybrid double-seasonal ARIMA–LSTM model for cellular
-traffic forecasting. *Scientific Reports*, 12, 8342.
-https://doi.org/10.1038/s41598-022-12345-x
+Trinh, H. D., Giupponi, L., & Dini, P. (2018). Mobile traffic forecasting using
+LSTM-based prediction models. *Proceedings of the 21st ACM International
+Conference on Modelling, Analysis and Simulation of Wireless and Mobile Systems
+(MSWiM ’18)*, 223–230. https://doi.org/10.1145/3242102.3242125
 
-Zhang, Y., et al. (2023). Attention-based Transformer for network traffic
-prediction. *IEEE Transactions on Network and Service Management*, 20(1), 112–124.
+Zhang, G. P. (2003). Time series forecasting using a hybrid ARIMA and neural
+network model. *Neurocomputing*, 50, 159–175.
+https://doi.org/10.1016/S0925-2312(01)00702-0

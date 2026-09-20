@@ -38,12 +38,12 @@ TOP3_SQUARES = [5161, 5059, 5259]
 EVAL_START   = pd.Timestamp("2013-12-16")
 EVAL_END     = pd.Timestamp("2013-12-23")   # exclusive
 
-SEQ_LEN      = 144    # one day of 10-min history (LSTM) — tuning Round 1 best
-FOURIER_K    = 6      # sine/cosine pairs for daily seasonality (SARIMA)
-SARIMA_ORDER = (2, 0, 2)   # d=0: ADF confirmed stationarity; tuning grid best
-LSTM_EPOCHS  = 20     # tuning Round 3 best
-LSTM_HIDDEN  = 64     # tuning Round 2 best
-LSTM_LR      = 1e-3   # tuning Round 3 best
+SEQ_LEN      = 144   # LSTM input window (1 day)
+FOURIER_K    = 6
+SARIMA_ORDER = (2, 0, 2)
+LSTM_EPOCHS  = 20
+LSTM_HIDDEN  = 64
+LSTM_LR      = 1e-3
 LSTM_BATCH   = 128
 
 os.makedirs(FIG_DIR, exist_ok=True)
@@ -55,19 +55,12 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 # ---------------------------------------------------------------------------
 
 def log_hardware():
-    try:
-        import psutil
-        ram_gb = psutil.virtual_memory().total / 1e9
-        ram_str = f"{ram_gb:.1f} GB RAM"
-    except ImportError:
-        ram_str = "RAM unknown (pip install psutil)"
+    # Hardware: record system info for timing context
     device = "CPU (no CUDA detected)" if not torch.cuda.is_available() else f"GPU: {torch.cuda.get_device_name(0)}"
     print("=== Hardware ===")
     print(f"  OS       : {platform.system()} {platform.release()}")
     print(f"  CPU      : {platform.processor()}")
-    print(f"  Memory   : {ram_str}")
     print(f"  PyTorch  : {device}")
-    print(f"  LSTM ran on: CPU")
     print()
 
 
@@ -213,8 +206,7 @@ def run_lstm(train: pd.Series, eval_: pd.Series):
 
 def _make_features(series: pd.Series) -> pd.DataFrame:
     df = pd.DataFrame({"y": series})
-    # recent lags (1-12: last 2 hours) + daily lags (144, 288) + weekly lag (1008)
-    # weekly lag included: tuning Round 3 showed consistent improvement on validation
+    # recent lags (1-12) + daily lags (144, 288) + weekly lag (1008)
     for lag in list(range(1, 13)) + [144, 288, 1008]:
         df[f"lag_{lag}"] = series.shift(lag)
     df["hour"]      = series.index.hour
@@ -253,19 +245,14 @@ def run_xgboost(train: pd.Series, eval_: pd.Series):
 COLORS = {"SARIMA": "steelblue", "LSTM": "tomato", "XGBoost": "seagreen"}
 
 
-def _fmt_ax(ax):
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
-    ax.xaxis.set_major_locator(mdates.DayLocator())
-
-
 def save_overlay_plot(eval_index, y_true, preds_dict, square_id, path):
-    """One plot with all models overlaid — summary figure."""
     fig, ax = plt.subplots(figsize=(14, 4))
     ax.plot(eval_index, y_true, label="Actual", color="black", lw=1.5)
     for name, preds in preds_dict.items():
         ax.plot(eval_index[:len(preds)], preds, label=name,
                 color=COLORS.get(name), alpha=0.85, lw=1.2)
-    _fmt_ax(ax)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
+    ax.xaxis.set_major_locator(mdates.DayLocator())
     ax.set_title(f"Square {square_id} — Dec 16–22: all models")
     ax.set_ylabel("Internet traffic")
     ax.legend()
@@ -275,13 +262,13 @@ def save_overlay_plot(eval_index, y_true, preds_dict, square_id, path):
 
 
 def save_individual_plots(eval_index, y_true, preds_dict, square_id, fig_dir):
-    """9 individual actual-vs-predicted plots (one per model per square)."""
     for name, preds in preds_dict.items():
         fig, ax = plt.subplots(figsize=(14, 4))
         ax.plot(eval_index, y_true, label="Actual", color="black", lw=1.5)
         ax.plot(eval_index[:len(preds)], preds, label=name,
                 color=COLORS.get(name), alpha=0.9, lw=1.2)
-        _fmt_ax(ax)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
+        ax.xaxis.set_major_locator(mdates.DayLocator())
         ax.set_title(f"Square {square_id} — Dec 16–22: {name}")
         ax.set_ylabel("Internet traffic")
         ax.legend()
@@ -293,14 +280,10 @@ def save_individual_plots(eval_index, y_true, preds_dict, square_id, fig_dir):
 
 
 def save_worst_period_plot(all_preds: dict, fig_dir: str):
-    """
-    Find the 24-hour window with the highest mean absolute error across all
-    models for square 5161, then plot a zoomed actual-vs-predicted for that window.
-    """
     eval_index = all_preds["index"]
     y_true     = all_preds["actual"]
 
-    # compute per-step mean absolute error across all three models
+    # per-step mean error across all three models
     errors = np.mean([
         np.abs(y_true - all_preds["SARIMA"]),
         np.abs(y_true - all_preds["LSTM"]),
@@ -319,7 +302,6 @@ def save_worst_period_plot(all_preds: dict, fig_dir: str):
     for name in ["SARIMA", "LSTM", "XGBoost"]:
         ax.plot(eval_index[sl], all_preds[name][sl], label=name,
                 color=COLORS[name], alpha=0.85, lw=1.3)
-    _fmt_ax(ax)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b %H:%M"))
     ax.xaxis.set_major_locator(mdates.HourLocator(interval=6))
     plt.xticks(rotation=20)

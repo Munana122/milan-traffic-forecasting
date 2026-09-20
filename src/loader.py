@@ -27,20 +27,7 @@ RAW_COLUMNS = [
 
 
 def load_and_aggregate_day(filepath: str) -> pd.DataFrame:
-    """
-    Memory-efficient load of one day's raw file.
-
-    Optimizations:
-      - usecols: never parse the SMS/call columns we don't need
-      - dtype:   int32 / float32 instead of pandas' default int64 / float64
-      - aggregate immediately, so the returned table is one row per
-        (square_id, time_interval) instead of one row per
-        (square_id, time_interval, country_code)
-
-    min_count=1 in the groupby-sum means an interval where EVERY country
-    code was missing stays NaN (genuinely no data), rather than silently
-    becoming 0.0 (which would misleadingly say "zero traffic").
-    """
+    """Load one day's file, keep only internet traffic, aggregate across country codes."""
     df = pd.read_csv(
         filepath,
         sep="\t",
@@ -57,11 +44,7 @@ def load_and_aggregate_day(filepath: str) -> pd.DataFrame:
 
 
 def naive_load_day(filepath: str) -> pd.DataFrame:
-    """
-    Naive load: all 8 columns, pandas' default dtypes (int64/float64),
-    no early aggregation. Used ONLY to produce a before/after memory
-    comparison for the report -- do not use this for the real pipeline.
-    """
+    """Naive load: all columns, default dtypes. Used only for memory comparison."""
     return pd.read_csv(filepath, sep="\t", header=None, names=RAW_COLUMNS)
 
 
@@ -74,11 +57,7 @@ _SOURCE_DIRS = [
 
 
 def build_dataset(raw_dir: Path, out_path: Path) -> pd.DataFrame:
-    """
-    Loop over every daily file across all source folders, aggregate each one,
-    then delete the copy in raw_dir so only one raw file lives on disk at a time.
-    Saves the combined DataFrame to out_path as Parquet and returns it.
-    """
+    """Process all daily files one at a time and save combined Parquet."""
     raw_dir.mkdir(parents=True, exist_ok=True)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
