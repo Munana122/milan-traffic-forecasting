@@ -108,6 +108,26 @@ def deep_dive_top_square(df: pd.DataFrame, top_square: int):
     print("  (p < 0.05 suggests the series is stationary)")
 
 
+def anomaly_check(df: pd.DataFrame, square_id: int, skip_days: int = 3):
+    """Check whether square_id still ranks top-3 after removing the first N days."""
+    totals_full = df.groupby("square_id")["internet_traffic"].sum()
+    cutoff = df["timestamp"].min() + pd.Timedelta(days=skip_days)
+    totals_trimmed = (
+        df[df["timestamp"] >= cutoff]
+        .groupby("square_id")["internet_traffic"].sum()
+    )
+    rank_full    = totals_full.rank(ascending=False)[square_id]
+    rank_trimmed = totals_trimmed.rank(ascending=False)[square_id]
+    print(f"\n=== Anomaly check: square {square_id} ===")
+    print(f"  Full period rank : {int(rank_full)}")
+    print(f"  Excl. first {skip_days} days rank: {int(rank_trimmed)}")
+    print(f"  Top-3 excl. first {skip_days} days: {list(totals_trimmed.nlargest(3).index)}")
+    first_3d = df[(df["square_id"] == square_id) & (df["timestamp"] < cutoff)]
+    rest     = df[(df["square_id"] == square_id) & (df["timestamp"] >= cutoff)]
+    print(f"  Traffic first {skip_days} days : {first_3d['internet_traffic'].sum():.0f}")
+    print(f"  Traffic remaining    : {rest['internet_traffic'].sum():.0f}")
+
+
 if __name__ == "__main__":
     df = load_data()
     totals = total_traffic_distribution(df)
@@ -118,5 +138,6 @@ if __name__ == "__main__":
 
     highest_square = top3[0]
     deep_dive_top_square(df, highest_square)
+    anomaly_check(df, highest_square, skip_days=3)
 
-    print(f"\nDone. Figures saved to '{FIG_DIR}/'.")
+    print(f"\nDone. Figures saved to '{FIG_DIR}/'")

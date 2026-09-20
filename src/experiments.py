@@ -4,14 +4,16 @@ Three models: SARIMA (ARIMA + Fourier terms), LSTM (PyTorch), XGBoost (lag featu
 One-step-ahead forecasting for the top-3 highest-traffic squares (5161, 5059, 5259),
 evaluated over Dec 16-22, 2013.
 
-SARIMA note: native seasonal_order with period=144 is computationally prohibitive
-in statsmodels. We use dynamic harmonic regression instead: plain ARIMA errors with
-Fourier-term exogenous regressors to capture daily seasonality. This is a standard
-technique for high-frequency seasonal data (Hyndman & Athanasopoulos, 2021, ch. 11).
+Outputs:
+  figures/section4/square_{sq}_all_models.png   — 3 overlay summary plots
+  figures/section4/square_{sq}_{model}.png      — 9 individual actual-vs-predicted plots
+  figures/section4/worst_period.png             — zoomed failure analysis plot
+  results/section4_results.csv
 """
 
 import os
 import time
+import platform
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -36,17 +38,37 @@ TOP3_SQUARES = [5161, 5059, 5259]
 EVAL_START   = pd.Timestamp("2013-12-16")
 EVAL_END     = pd.Timestamp("2013-12-23")   # exclusive
 
-SEQ_LEN      = 144    # one day of 10-min history (LSTM)
-N_LAGS       = 144    # lag features for XGBoost (same window)
+SEQ_LEN      = 144    # one day of 10-min history (LSTM) — tuning Round 1 best
 FOURIER_K    = 6      # sine/cosine pairs for daily seasonality (SARIMA)
-SARIMA_ORDER = (2, 0, 2)   # d=0: ADF confirmed stationarity
-LSTM_EPOCHS  = 20
-LSTM_HIDDEN  = 64
-LSTM_LR      = 1e-3
+SARIMA_ORDER = (2, 0, 2)   # d=0: ADF confirmed stationarity; tuning grid best
+LSTM_EPOCHS  = 20     # tuning Round 3 best
+LSTM_HIDDEN  = 64     # tuning Round 2 best
+LSTM_LR      = 1e-3   # tuning Round 3 best
 LSTM_BATCH   = 128
 
 os.makedirs(FIG_DIR, exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Hardware info
+# ---------------------------------------------------------------------------
+
+def log_hardware():
+    try:
+        import psutil
+        ram_gb = psutil.virtual_memory().total / 1e9
+        ram_str = f"{ram_gb:.1f} GB RAM"
+    except ImportError:
+        ram_str = "RAM unknown (pip install psutil)"
+    device = "CPU (no CUDA detected)" if not torch.cuda.is_available() else f"GPU: {torch.cuda.get_device_name(0)}"
+    print("=== Hardware ===")
+    print(f"  OS       : {platform.system()} {platform.release()}")
+    print(f"  CPU      : {platform.processor()}")
+    print(f"  Memory   : {ram_str}")
+    print(f"  PyTorch  : {device}")
+    print(f"  LSTM ran on: CPU")
+    print()
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +101,6 @@ def compute_metrics(y_true, y_pred) -> dict:
 
 
 def fourier_features(index: pd.DatetimeIndex, period=144, K=FOURIER_K) -> pd.DataFrame:
-    """Sine/cosine pairs encoding position within the daily cycle."""
     t = np.arange(len(index))
     cols = {}
     for k in range(1, K + 1):
@@ -105,7 +126,6 @@ def run_sarima(train: pd.Series, eval_: pd.Series):
     ).fit(disp=False)
     train_time = time.perf_counter() - t0
 
-    # rolling one-step-ahead: append each true observation, no refit
     t0 = time.perf_counter()
     preds = []
     state = fitted
@@ -147,21 +167,24 @@ class _LSTMModel(nn.Module):
 
 
 def run_lstm(train: pd.Series, eval_: pd.Series):
-    scaler     = MinMaxScaler()
-    train_sc   = scaler.fit_transform(train.values.reshape(-1, 1)).flatten()
+    scaler   = MinMaxScaler()
+    train_sc = scaler.fit_transform(train.values.reshape(-1, 1)).flatten()
 
-    loader = DataLoader(_SeqDataset(train_sc, SEQ_LEN), batch_size=LSTM_BATCH, shuffle=True)
-    model  = _LSTMModel()
-    opt    = torch.optim.Adam(model.parameters(), lr=LSTM_LR)
+    loader  = DataLoader(_SeqDataset(train_sc, SEQ_LEN), batch_size=LSTM_BATCH, shuffle=True)
+    model   = _LSTMModel()
+    opt     = torch.optim.Adam(model.parameters(), lr=LSTM_LR)
     loss_fn = nn.MSELoss()
 
     t0 = time.perf_counter()
     model.train()
     for ep in range(LSTM_EPOCHS):
-        ep_loss = sum(
-            (lambda loss: (opt.zero_grad(), loss.backward(), opt.step(), loss.item() * len(x))[-1])(loss_fn(model(x), y))
-            for x, y in loader
-        )
+        ep_loss = 0.0
+        for x, y in loader:
+            opt.zero_grad()
+            loss = loss_fn(model(x), y)
+            loss.backward()
+            opt.step()
+            ep_loss += loss.item() * len(x)
         print(f"  LSTM epoch {ep+1:02d}/{LSTM_EPOCHS}  loss={ep_loss/len(loader.dataset):.5f}")
     train_time = time.perf_counter() - t0
 
@@ -190,8 +213,9 @@ def run_lstm(train: pd.Series, eval_: pd.Series):
 
 def _make_features(series: pd.Series) -> pd.DataFrame:
     df = pd.DataFrame({"y": series})
-    # recent lags (1–12: last 2 hours) + daily lags (144, 288: yesterday, 2 days ago)
-    for lag in list(range(1, 13)) + [144, 288]:
+    # recent lags (1-12: last 2 hours) + daily lags (144, 288) + weekly lag (1008)
+    # weekly lag included: tuning Round 3 showed consistent improvement on validation
+    for lag in list(range(1, 13)) + [144, 288, 1008]:
         df[f"lag_{lag}"] = series.shift(lag)
     df["hour"]      = series.index.hour
     df["dayofweek"] = series.index.dayofweek
@@ -226,22 +250,91 @@ def run_xgboost(train: pd.Series, eval_: pd.Series):
 # Plotting
 # ---------------------------------------------------------------------------
 
-def save_plot(eval_index, y_true, preds_dict: dict, square_id: int, path: str):
-    fig, ax = plt.subplots(figsize=(14, 4))
-    ax.plot(eval_index, y_true, label="Actual", color="black", lw=1.5)
-    colors = {"SARIMA": "steelblue", "LSTM": "tomato", "XGBoost": "seagreen"}
-    for name, preds in preds_dict.items():
-        ax.plot(eval_index[:len(preds)], preds, label=name,
-                color=colors.get(name), alpha=0.85, lw=1.2)
+COLORS = {"SARIMA": "steelblue", "LSTM": "tomato", "XGBoost": "seagreen"}
+
+
+def _fmt_ax(ax):
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
     ax.xaxis.set_major_locator(mdates.DayLocator())
-    ax.set_title(f"Square {square_id} — Dec 16–22 one-step-ahead forecasts")
+
+
+def save_overlay_plot(eval_index, y_true, preds_dict, square_id, path):
+    """One plot with all models overlaid — summary figure."""
+    fig, ax = plt.subplots(figsize=(14, 4))
+    ax.plot(eval_index, y_true, label="Actual", color="black", lw=1.5)
+    for name, preds in preds_dict.items():
+        ax.plot(eval_index[:len(preds)], preds, label=name,
+                color=COLORS.get(name), alpha=0.85, lw=1.2)
+    _fmt_ax(ax)
+    ax.set_title(f"Square {square_id} — Dec 16–22: all models")
     ax.set_ylabel("Internet traffic")
     ax.legend()
     plt.tight_layout()
     plt.savefig(path, dpi=150)
     plt.close()
+
+
+def save_individual_plots(eval_index, y_true, preds_dict, square_id, fig_dir):
+    """9 individual actual-vs-predicted plots (one per model per square)."""
+    for name, preds in preds_dict.items():
+        fig, ax = plt.subplots(figsize=(14, 4))
+        ax.plot(eval_index, y_true, label="Actual", color="black", lw=1.5)
+        ax.plot(eval_index[:len(preds)], preds, label=name,
+                color=COLORS.get(name), alpha=0.9, lw=1.2)
+        _fmt_ax(ax)
+        ax.set_title(f"Square {square_id} — Dec 16–22: {name}")
+        ax.set_ylabel("Internet traffic")
+        ax.legend()
+        plt.tight_layout()
+        path = f"{fig_dir}/square_{square_id}_{name}.png"
+        plt.savefig(path, dpi=150)
+        plt.close()
+        print(f"  Saved {path}")
+
+
+def save_worst_period_plot(all_preds: dict, fig_dir: str):
+    """
+    Find the 24-hour window with the highest mean absolute error across all
+    models for square 5161, then plot a zoomed actual-vs-predicted for that window.
+    """
+    eval_index = all_preds["index"]
+    y_true     = all_preds["actual"]
+
+    # compute per-step mean absolute error across all three models
+    errors = np.mean([
+        np.abs(y_true - all_preds["SARIMA"]),
+        np.abs(y_true - all_preds["LSTM"]),
+        np.abs(y_true - all_preds["XGBoost"]),
+    ], axis=0)
+
+    # find 24-hour window (144 steps) with highest mean error
+    window = 144
+    best_start = int(np.argmax(
+        [errors[i:i+window].mean() for i in range(len(errors) - window)]
+    ))
+    sl = slice(best_start, best_start + window)
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.plot(eval_index[sl], y_true[sl], label="Actual", color="black", lw=2)
+    for name in ["SARIMA", "LSTM", "XGBoost"]:
+        ax.plot(eval_index[sl], all_preds[name][sl], label=name,
+                color=COLORS[name], alpha=0.85, lw=1.3)
+    _fmt_ax(ax)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b %H:%M"))
+    ax.xaxis.set_major_locator(mdates.HourLocator(interval=6))
+    plt.xticks(rotation=20)
+    ax.set_title(f"Square 5161 — worst 24-hour window (all models)\n"
+                 f"Period: {eval_index[best_start].strftime('%Y-%m-%d %H:%M')} – "
+                 f"{eval_index[best_start+window-1].strftime('%H:%M')}")
+    ax.set_ylabel("Internet traffic")
+    ax.legend()
+    plt.tight_layout()
+    path = f"{fig_dir}/worst_period_square_5161.png"
+    plt.savefig(path, dpi=150)
+    plt.close()
     print(f"  Saved {path}")
+    print(f"  Worst window starts: {eval_index[best_start]}")
+    print(f"  Mean error in window: {errors[sl].mean():.2f}")
 
 
 # ---------------------------------------------------------------------------
@@ -249,22 +342,25 @@ def save_plot(eval_index, y_true, preds_dict: dict, square_id: int, path: str):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    records = []
+    log_hardware()
+
+    records   = []
+    sq5161_preds = {}   # store for worst-period analysis
 
     for sq in TOP3_SQUARES:
         print(f"\n{'='*50}\nSquare {sq}\n{'='*50}")
-        series        = load_series(sq)
-        train, eval_  = train_eval_split(series)
+        series       = load_series(sq)
+        train, eval_ = train_eval_split(series)
         print(f"  Train: {len(train):,} steps  |  Eval: {len(eval_):,} steps")
-        preds_dict    = {}
+        preds_dict   = {}
 
         # --- SARIMA ---
         print("Running SARIMA...")
         s_preds, s_tr, s_inf = run_sarima(train, eval_)
         preds_dict["SARIMA"] = s_preds
         records.append({"square_id": sq, "model": "SARIMA",
-                         **compute_metrics(eval_.values, s_preds),
-                         "train_s": round(s_tr, 2), "inference_s": round(s_inf, 2)})
+                        **compute_metrics(eval_.values, s_preds),
+                        "train_s": round(s_tr, 2), "inference_s": round(s_inf, 2)})
         print(f"  SARIMA done  train={s_tr:.1f}s  inference={s_inf:.1f}s")
 
         # --- LSTM ---
@@ -272,8 +368,8 @@ if __name__ == "__main__":
         l_preds, l_tr, l_inf = run_lstm(train, eval_)
         preds_dict["LSTM"] = l_preds
         records.append({"square_id": sq, "model": "LSTM",
-                         **compute_metrics(eval_.values, l_preds),
-                         "train_s": round(l_tr, 2), "inference_s": round(l_inf, 2)})
+                        **compute_metrics(eval_.values, l_preds),
+                        "train_s": round(l_tr, 2), "inference_s": round(l_inf, 2)})
         print(f"  LSTM done  train={l_tr:.1f}s  inference={l_inf:.1f}s")
 
         # --- XGBoost ---
@@ -281,12 +377,31 @@ if __name__ == "__main__":
         x_preds, x_tr, x_inf, x_idx = run_xgboost(train, eval_)
         preds_dict["XGBoost"] = x_preds
         records.append({"square_id": sq, "model": "XGBoost",
-                         **compute_metrics(eval_.loc[x_idx].values, x_preds),
-                         "train_s": round(x_tr, 2), "inference_s": round(x_inf, 2)})
+                        **compute_metrics(eval_.loc[x_idx].values, x_preds),
+                        "train_s": round(x_tr, 2), "inference_s": round(x_inf, 2)})
         print(f"  XGBoost done  train={x_tr:.1f}s  inference={x_inf:.1f}s")
 
-        save_plot(eval_.index, eval_.values, preds_dict, sq,
-                  f"{FIG_DIR}/square_{sq}.png")
+        # overlay summary plot
+        save_overlay_plot(eval_.index, eval_.values, preds_dict, sq,
+                          f"{FIG_DIR}/square_{sq}_all_models.png")
+        print(f"  Saved {FIG_DIR}/square_{sq}_all_models.png")
+
+        # 9 individual plots
+        save_individual_plots(eval_.index, eval_.values, preds_dict, sq, FIG_DIR)
+
+        # store square 5161 predictions for failure analysis
+        if sq == 5161:
+            sq5161_preds = {
+                "index":   eval_.index,
+                "actual":  eval_.values,
+                "SARIMA":  s_preds,
+                "LSTM":    l_preds,
+                "XGBoost": x_preds,
+            }
+
+    # worst-period failure analysis on square 5161
+    print("\nGenerating worst-period failure analysis...")
+    save_worst_period_plot(sq5161_preds, FIG_DIR)
 
     results = pd.DataFrame(records)
     results.to_csv(f"{RESULTS_DIR}/section4_results.csv", index=False)
@@ -294,5 +409,6 @@ if __name__ == "__main__":
     print("\n\n=== RESULTS ===")
     for sq in TOP3_SQUARES:
         print(f"\nSquare {sq}:")
-        sub = results[results["square_id"] == sq][["model", "MAE", "MAPE", "RMSE", "train_s", "inference_s"]]
+        sub = results[results["square_id"] == sq][
+            ["model", "MAE", "MAPE", "RMSE", "train_s", "inference_s"]]
         print(sub.to_string(index=False))
