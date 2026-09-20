@@ -1,105 +1,89 @@
 # Milan Internet Traffic Forecasting
 
-Comparative analysis of SARIMA, LSTM, and XGBoost for one-step-ahead mobile
-network traffic forecasting using the Telecom Italia Big Data Challenge dataset
+Comparing SARIMA, LSTM, and XGBoost for one-step-ahead forecasting of mobile
+internet traffic, using the Telecom Italia Big Data Challenge dataset
 (Milan, Nov 2013 – Jan 2014).
 
-## Repository structure
+## Layout
 
-```
 src/
-  loader.py       — one-time ingestion pipeline (raw .txt → Parquet)
-  data.py         — canonical load function used by all later scripts
-  eda.py          — Section 2: EDA figures (distribution, time series, ACF, decomposition)
-  eda_stats.py    — Section 2: prints all summary statistics
-  tuning.py       — Section 4: iterative hyperparameter tuning experiments
-  experiments.py  — Section 4: final model training and evaluation
+loader.py — one-time ingestion: raw .txt files -> Parquet
+data.py — shared loader that everything else imports from
+eda.py — Section 2 figures (distribution, time series, ACF, decomposition)
+eda_stats.py — prints the numbers behind those figures
+tuning.py — hyperparameter search for Section 4
+experiments.py — final training + evaluation
 data/
-  raw/            — staging area (files deleted after processing, not tracked)
-  processed/      — milan_internet_traffic.parquet (not tracked, rebuild with loader.py)
+raw/ — where you drop the downloaded files; gets emptied as loader.py runs
+processed/ — milan_internet_traffic.parquet (not tracked, rebuild it yourself)
 figures/
-  traffic_distribution.png
-  first_two_weeks.png
-  acf_top_square.png
-  decomposition_top_square.png
-  section4/       — per-square prediction plots
+traffic_distribution.png, first_two_weeks.png, acf_top_square.png, decomposition_top_square.png
+section4/ — per-square prediction plots
 notes/
-  full_report.md          — complete assembled report
-  section1_report.md
-  section2_report.md
-  section3_report.md
-  section4_report.md
-  loader_memory_benchmark.md
+full_report.md + one report per section, plus loader_memory_benchmark.md
 results/
-  section4_results.csv    — MAE / MAPE / RMSE for all models × all squares
-  tuning_log.csv          — hyperparameter tuning experiment log
+section4_results.csv, tuning_log.csv
+
+
+## Getting set up
+
+Python 3.10+, I've been running it on 3.14.
+
+```bash
+pip install -r requirements.txt
 ```
-
-## Setup
-
-### 1. Python version
-Python 3.10+ recommended (tested on 3.14).
-
-### 2. Install dependencies
+or by hand:
 ```bash
 pip install pandas pyarrow statsmodels matplotlib xgboost scikit-learn torch
 ```
 
-Or install from the requirements file:
-```bash
-pip install -r requirements.txt
-```
+### The dataset
 
-### 3. Download the dataset
-Download the 62 daily `.txt` files from the
-[Telecom Italia Big Data Challenge](https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/EGZHFV)
-and place them in folders at the project root:
-```
-dataverse_files/          ← November 2013 files
-dataverse_files (1)/      ← December 2013 files
-dataverse_files (2)/      ← Dec 31 2013 + Jan 1 2014
-```
+Grab the 62 daily `.txt` files from [Harvard Dataverse](https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/EGZHFV). They download split across a few folders — just leave them named however Dataverse gives them to you, at the project root:
 
-## Running the pipeline
+dataverse_files/ # November
+dataverse_files (1)/ # December
+dataverse_files (2)/ # Dec 31 + Jan 1
 
-### Step 1 — Build the Parquet file (run once)
+
+## Running it
+
+**1. Build the Parquet file — only need to do this once:**
 ```bash
 python src/loader.py
 ```
-Reads all 62 raw files, aggregates internet traffic per (square_id, time_interval),
-deletes each raw file after processing, and writes:
-`data/processed/milan_internet_traffic.parquet` (409 MB, ~89 M rows).
+Chews through all 62 files one at a time, keeps only what we actually need (Internet traffic per square per 10-min interval, summed across country codes), deletes each raw file as it goes so you're never holding more than one on disk, and dumps the result to `data/processed/milan_internet_traffic.parquet` (~409 MB, ~89M rows). Takes a while — go make coffee.
 
-### Step 2 — Exploratory analysis
+**2. EDA:**
 ```bash
 python src/eda.py
 ```
-Saves four figures to `figures/`. Prints top-3 square IDs and ADF result.
+Spits out the four figures and prints the top-3 squares plus the ADF stationarity result.
 
-### Step 3 — Hyperparameter tuning
+**3. Tuning:**
 ```bash
 python src/tuning.py
 ```
-Runs iterative tuning experiments on square 5161 using a validation split
-(Dec 9–15). Saves `results/tuning_log.csv`.
+Grid-searches over square 5161 (our highest-traffic square) using Dec 9–15 as a validation week, logs every run to `results/tuning_log.csv`.
 
-### Step 4 — Final experiments
+**4. The actual experiment:**
 ```bash
 python src/experiments.py
 ```
-Trains and evaluates all three models on the top-3 squares for Dec 16–22.
-Saves `results/section4_results.csv` and three prediction plots to
-`figures/section4/`.
+Trains all three models on the top-3 squares and forecasts Dec 16–22. Writes the metrics table and the prediction plots.
 
-## Key results
+## Where things stand
 
-| Model | Avg MAE | Avg RMSE | Avg train (s) |
-|---|---|---|---|
-| SARIMA | 72.8 | 104.9 | 7.1 |
-| LSTM | 91.8 | 132.8 | 68.7 |
-| XGBoost | 75.1 | 111.0 | 1.5 |
+| Model   | Avg MAE | Avg RMSE | Avg train time (s) |
+|---------|---------|----------|---------------------|
+| SARIMA  | 72.8    | 104.9    | 7.1                 |
+| LSTM    | 91.8    | 132.8    | 68.7                |
+| XGBoost | 75.1    | 111.0    | 1.5                 |
 
 Top-3 squares by total traffic: **5161**, 5059, 5259.
 
+Honestly SARIMA and XGBoost are basically tied, and XGBoost gets there way faster. LSTM is currently the worst of the three despite taking the longest to train, which isn't what I expected going in — need to figure out if that's a tuning issue or just how it is on this data before I write it up as a real finding.
+
 ## Hardware
-All experiments run on CPU (Intel, Windows 11). No GPU required.
+
+CPU only — Intel, Windows 11. Didn't touch a GPU for any of this.
